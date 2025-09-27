@@ -3,9 +3,9 @@
 using namespace std;
 int main() {
   string line;
-  while (true)
+  while (getline(cin, line))
   {
-    if(!getline(cin, line))
+    if(line=="\\q")
   {
     break;
   }
