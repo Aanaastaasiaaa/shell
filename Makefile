@@ -52,7 +52,6 @@ uninstall:
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) *.deb
 
-
 # Показать справку
 help:
 	@echo "Доступные команды:"
