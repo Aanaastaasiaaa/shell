@@ -2,16 +2,21 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <sstream>
+#include <cstdlib>
 
 using namespace std;
 
-int main()
+int main() 
 {
     vector<string> history;
     string input;
     bool running = true;
  string history_file = "kubsh_history.txt";
 ofstream write_file(history_file, ios::app);
+    string history_file = "kubsh_history.txt";
+    ofstream write_file(history_file, ios::app);
+    
     while (running && getline(cin, input)) 
     {
         if (input.empty()) {
@@ -19,15 +24,19 @@ ofstream write_file(history_file, ios::app);
         }
         write_file << input << endl;
         write_file.flush(); 
+        write_file.flush();
+        
         if (input == "\\q") 
         {
             running = false;
             break;
         }
        else if (input.find("debug ") == 0) 
+        else if (input.find("debug ") == 0) 
         {
             string text = input.substr(6);
-            if (text.size() >= 2)
+            
+            if (text.size() >= 2) 
             {
                 char first = text[0];
                 char last = text[text.size()-1];
@@ -36,6 +45,7 @@ ofstream write_file(history_file, ios::app);
                     text = text.substr(1, text.size()-2);
                 }
             }
+            
             cout << text << endl;
             history.push_back(input);
         }
@@ -43,6 +53,8 @@ ofstream write_file(history_file, ios::app);
 
         else if (input.substr(0,4) == "\\e $") {
 
+        else if (input.substr(0,4) == "\\e $") 
+        {
             string var_name = input.substr(4);
             const char* env_value = getenv(var_name.c_str());
 
@@ -70,12 +82,12 @@ ofstream write_file(history_file, ios::app);
 
             }
         else
+        }
+        else 
         {
             cout << input << ": command not found" << endl;
             history.push_back(input);
         }
- write_file.close();
     }
     return 0;
 }
-
