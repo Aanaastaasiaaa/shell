@@ -4,10 +4,9 @@
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
-// Добавляем новые заголовки:
-#include <cstdio>      // Для FILE, fopen, fread, fclose
-#include <cstring>     // Для strlen, strncmp
-#include <cerrno>      // Для errno
+#include <cstdio>      
+#include <cstring>     
+#include <cerrno>     
 
 using namespace std;
 
