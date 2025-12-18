@@ -17,17 +17,21 @@
 #include <grp.h>
 #include <dirent.h>
 #include <cstring>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
 
 using namespace std;
 
 // Глобальные переменные для сигналов
 volatile sig_atomic_t sighup_received = 0;
 volatile sig_atomic_t running = true;
+atomic<bool> vfs_mounted(false);
 
-// Обновленный обработчик SIGHUP - выводит прямо в stdout
+// Обновленный обработчик SIGHUP
 void handle_sighup(int signum) {
     (void)signum;
-    // Выводим напрямую в stdout для гарантии
     const char* msg = "Configuration reloaded\n";
     write(STDOUT_FILENO, msg, strlen(msg));
     sighup_received = 1;
@@ -65,21 +69,6 @@ bool dir_exists(const string& path) {
     struct stat buffer;
     if (stat(path.c_str(), &buffer) != 0) return false;
     return S_ISDIR(buffer.st_mode);
-}
-
-// Создание директории
-bool create_directory(const string& path) {
-    if (dir_exists(path)) return true;
-    
-    size_t pos = path.find_last_of('/');
-    if (pos != string::npos) {
-        string parent = path.substr(0, pos);
-        if (!parent.empty()) {
-            create_directory(parent);
-        }
-    }
-    
-    return mkdir(path.c_str(), 0755) == 0;
 }
 
 // Поиск команды в PATH
@@ -135,222 +124,107 @@ bool execute_external(const vector<string>& args) {
     return false;
 }
 
-// VFS: Создание информации о пользователе
-void create_user_vfs_info(const string& username) {
-    string vfs_dir = "/opt/users";
-    string user_dir = vfs_dir + "/" + username;
+// Функция для монтирования VFS через FUSE
+bool mount_vfs() {
+    // Создаем директорию если не существует
+    string home_dir = getenv("HOME");
+    string mount_point = home_dir + "/users";
     
-    // Создаем директорию пользователя
-    if (!create_directory(user_dir)) {
-        cerr << "Failed to create directory for user: " << username << endl;
-        return;
+    if (!dir_exists(mount_point)) {
+        string cmd = "mkdir -p \"" + mount_point + "\"";
+        system(cmd.c_str());
     }
     
-    // Получаем информацию о пользователе
-    struct passwd* pw = getpwnam(username.c_str());
-    if (!pw) {
-        // Пользователь не существует в системе - создаем временные файлы
-        ofstream id_file(user_dir + "/id");
-        if (id_file) {
-            id_file << "1000" << endl;
-            id_file.close();
-        }
-        
-        ofstream home_file(user_dir + "/home");
-        if (home_file) {
-            home_file << "/home/" + username << endl;
-            home_file.close();
-        }
-        
-        ofstream shell_file(user_dir + "/shell");
-        if (shell_file) {
-            shell_file << "/bin/bash" << endl;
-            shell_file.close();
-        }
-        
-        // Пытаемся добавить пользователя в систему (с sudo)
-        string adduser_cmd = "sudo adduser --disabled-password --gecos '' " + username + " >/dev/null 2>&1";
-        system(adduser_cmd.c_str());
-    } else {
-        // Пользователь существует - создаем файлы с реальными данными
-        ofstream id_file(user_dir + "/id");
-        if (id_file) {
-            id_file << pw->pw_uid << endl;
-            id_file.close();
-        }
-        
-        ofstream home_file(user_dir + "/home");
-        if (home_file) {
-            home_file << pw->pw_dir << endl;
-            home_file.close();
-        }
-        
-        ofstream shell_file(user_dir + "/shell");
-        if (shell_file) {
-            shell_file << pw->pw_shell << endl;
-            shell_file.close();
-        }
-    }
-}
-
-// VFS: Инициализация и синхронизация (ТОЛЬКО для пользователей с /bin/bash или /bin/sh)
-void init_vfs() {
-    string vfs_dir = "/opt/users";
-    
-    // Создаем основную директорию
-    if (!create_directory(vfs_dir)) {
-        cerr << "Failed to create VFS directory: " << vfs_dir << endl;
-        return;
+    // Проверяем, не смонтирована ли уже
+    string check_cmd = "mount | grep -q \"" + mount_point + "\"";
+    if (system(check_cmd.c_str()) == 0) {
+        // Уже смонтировано
+        cout << "VFS already mounted at " << mount_point << endl;
+        return true;
     }
     
-    // Читаем /etc/passwd и создаем директории ТОЛЬКО для пользователей с /bin/bash или /bin/sh
-    ifstream passwd_file("/etc/passwd");
-    if (passwd_file) {
-        string line;
-        while (getline(passwd_file, line)) {
-            // Проверяем, заканчивается ли строка на 'sh' (как в тесте)
-            if (line.find(":sh\n") != string::npos || line.find("/bin/bash") != string::npos) {
-                vector<string> parts;
-                stringstream ss(line);
-                string part;
-                
-                while (getline(ss, part, ':')) {
-                    parts.push_back(part);
-                }
-                
-                if (parts.size() >= 7) {
-                    string username = parts[0];
-                    string shell = parts[6];
-                    
-                    // Создаем директорию только если shell заканчивается на sh
-                    if (shell == "/bin/bash" || shell == "/bin/sh") {
-                        string user_dir = vfs_dir + "/" + username;
-                        if (!dir_exists(user_dir)) {
-                            create_directory(user_dir);
-                            
-                            // Создаем файлы БЕЗ лишних переводов строк
-                            ofstream id_file(user_dir + "/id");
-                            if (id_file) {
-                                id_file << parts[2];  // UID - БЕЗ endl
-                                id_file.close();
-                            }
-                            
-                            ofstream home_file(user_dir + "/home");
-                            if (home_file) {
-                                home_file << parts[5];  // Home directory - БЕЗ endl
-                                home_file.close();
-                            }
-                            
-                            ofstream shell_file(user_dir + "/shell");
-                            if (shell_file) {
-                                shell_file << shell;  // Shell - БЕЗ endl
-                                shell_file.close();
-                            }
-                        }
-                    }
-                }
-            }
+    // Запускаем FUSE в отдельном процессе
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Дочерний процесс для FUSE
+        string fuse_path = "./users_vfs";
+        if (!file_exists(fuse_path)) {
+            // Если не найден, ищем в PATH
+            fuse_path = find_in_path("users_vfs");
         }
-        passwd_file.close();
-    }
-}
-
-// Функция для проверки и создания недостающих файлов в VFS
-void check_and_create_vfs_files(const string& username) {
-    string vfs_dir = "/opt/users";
-    string user_dir = vfs_dir + "/" + username;
-    
-    if (!dir_exists(user_dir)) {
-        return;
-    }
-    
-    // Проверяем наличие файлов
-    string id_file = user_dir + "/id";
-    string home_file = user_dir + "/home";
-    string shell_file = user_dir + "/shell";
-    
-    if (!file_exists(id_file) || !file_exists(home_file) || !file_exists(shell_file)) {
-        // Получаем информацию о пользователе
-        struct passwd* pw = getpwnam(username.c_str());
-        if (pw) {
-            // Создаем файлы БЕЗ лишних переводов строк
-            ofstream id_f(id_file);
-            if (id_f) {
-                id_f << pw->pw_uid;  // БЕЗ endl
-                id_f.close();
-            }
+        
+        if (!fuse_path.empty()) {
+            char* argv[] = {
+                const_cast<char*>(fuse_path.c_str()),
+                const_cast<char*>(mount_point.c_str()),
+                nullptr
+            };
             
-            ofstream home_f(home_file);
-            if (home_f) {
-                home_f << pw->pw_dir;  // БЕЗ endl
-                home_f.close();
-            }
-            
-            ofstream shell_f(shell_file);
-            if (shell_f) {
-                shell_f << pw->pw_shell;  // БЕЗ endl
-                shell_f.close();
-            }
+            execv(argv[0], argv);
+            exit(127);
         } else {
-            // Пользователь не существует - создаем базовые файлы
-            ofstream id_f(id_file);
-            if (id_f) {
-                id_f << "1000";  // БЕЗ endl
-                id_f.close();
-            }
-            
-            ofstream home_f(home_file);
-            if (home_f) {
-                home_f << "/home/" + username;  // БЕЗ endl
-                home_f.close();
-            }
-            
-            ofstream shell_f(shell_file);
-            if (shell_f) {
-                shell_f << "/bin/bash";  // БЕЗ endl
-                shell_f.close();
-            }
-            
-            // Пытаемся добавить пользователя
-            string adduser_cmd = "sudo adduser --disabled-password --gecos '' " + username + " >/dev/null 2>&1";
-            system(adduser_cmd.c_str());
+            cerr << "FUSE VFS binary not found. Please build users_vfs first." << endl;
+            exit(1);
         }
+    } else if (pid > 0) {
+        // Даем время на монтирование
+        sleep(1);
+        
+        // Проверяем успешность монтирования
+        string check_cmd2 = "mount | grep -q \"" + mount_point + "\"";
+        if (system(check_cmd2.c_str()) == 0) {
+            cout << "VFS mounted successfully at " << mount_point << endl;
+            vfs_mounted = true;
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// Функция для размонтирования VFS
+void unmount_vfs() {
+    string home_dir = getenv("HOME");
+    string mount_point = home_dir + "/users";
+    
+    if (dir_exists(mount_point)) {
+        string cmd = "fusermount -u \"" + mount_point + "\" 2>/dev/null";
+        system(cmd.c_str());
     }
 }
 
-// VFS: Мониторинг изменений в директории
-void monitor_vfs_changes() {
-    string vfs_dir = "/opt/users";
-    
-    if (!dir_exists(vfs_dir)) {
+// Команда для управления VFS
+void handle_vfs_command(const vector<string>& args) {
+    if (args.size() < 2) {
+        cout << "Usage: vfs [mount|unmount|status]" << endl;
         return;
     }
     
-    // Проверяем новые директории
-    DIR* dir = opendir(vfs_dir.c_str());
-    if (!dir) return;
+    string command = args[1];
     
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_name[0] != '.') {
-            string username = entry->d_name;
-            string user_dir = vfs_dir + "/" + username;
-            
-            if (dir_exists(user_dir)) {
-                // Проверяем и создаем файлы если нужно
-                check_and_create_vfs_files(username);
-            }
+    if (command == "mount") {
+        if (mount_vfs()) {
+            cout << "VFS mounted successfully" << endl;
+        } else {
+            cout << "Failed to mount VFS" << endl;
         }
+    } else if (command == "unmount") {
+        unmount_vfs();
+        vfs_mounted = false;
+        cout << "VFS unmounted" << endl;
+    } else if (command == "status") {
+        string home_dir = getenv("HOME");
+        string mount_point = home_dir + "/users";
+        string check_cmd = "mount | grep \"" + mount_point + "\"";
+        
+        if (system(check_cmd.c_str()) == 0) {
+            cout << "VFS is mounted at " << mount_point << endl;
+        } else {
+            cout << "VFS is not mounted" << endl;
+        }
+    } else {
+        cout << "Unknown vfs command: " << command << endl;
     }
-    
-    closedir(dir);
-}
-
-// Функция для удаления пользователя при удалении директории
-void handle_user_deletion(const string& username) {
-    // Удаляем пользователя из системы
-    string deluser_cmd = "sudo userdel -r " + username + " >/dev/null 2>&1";
-    system(deluser_cmd.c_str());
 }
 
 int main() 
@@ -358,7 +232,7 @@ int main()
     vector<string> history;
     string input;
     
-    // Файл истории - в домашней директории
+    // Файл истории
     string home_dir = getenv("HOME");
     string history_file = home_dir + "/.kubsh_history";
     ofstream write_file(history_file, ios::app);
@@ -368,15 +242,15 @@ int main()
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
     
-    // Инициализируем VFS
-    init_vfs();
+    // Автоматически монтируем VFS при запуске
+    if (!mount_vfs()) {
+        cout << "Warning: Could not mount VFS automatically" << endl;
+        cout << "You can mount it manually with: vfs mount" << endl;
+    }
     
     // Основной цикл
     while (running) 
     {
-        // Мониторим изменения в VFS
-        monitor_vfs_changes();
-        
         // Выводим приглашение только если stdin - терминал
         if (isatty(STDIN_FILENO)) {
             cout << "kubsh> ";
@@ -477,71 +351,8 @@ int main()
                 }
             }
         }
-        else if (args[0] == "cat" && args.size() > 1 && args[1] == "/etc/passwd") {
-            ifstream file("/etc/passwd");
-            if (file) {
-                string line;
-                while (getline(file, line)) {
-                    cout << line << endl;
-                }
-                file.close();
-            } else {
-                cout << "cat: /etc/passwd: No such file or directory" << endl;
-            }
-        }
-        else if (args[0] == "mkdir" && args.size() > 1) {
-            string dir_path = args[1];
-            
-            // Проверяем, не пытаемся ли создать директорию пользователя в VFS
-            if (dir_path.find("/opt/users/") == 0) {
-                string username = dir_path.substr(strlen("/opt/users/"));
-                if (!username.empty() && username.find('/') == string::npos) {
-                    create_user_vfs_info(username);
-                    cout << "Created VFS directory for user: " << username << endl;
-                } else {
-                    create_directory(dir_path);
-                }
-            } else {
-                create_directory(dir_path);
-            }
-        }
-        else if (args[0] == "ls" && args.size() > 1 && args[1] == "/opt/users") {
-            string vfs_dir = "/opt/users";
-            if (dir_exists(vfs_dir)) {
-                DIR* dir = opendir(vfs_dir.c_str());
-                if (dir) {
-                    struct dirent* entry;
-                    while ((entry = readdir(dir)) != nullptr) {
-                        if (entry->d_name[0] != '.') {
-                            string full_path = vfs_dir + "/" + entry->d_name;
-                            if (dir_exists(full_path)) {
-                                cout << entry->d_name << endl;
-                            }
-                        }
-                    }
-                    closedir(dir);
-                }
-            } else {
-                cout << "ls: cannot access '/opt/users': No such file or directory" << endl;
-            }
-        }
-        else if (args[0] == "rmdir" && args.size() > 1) {
-            string dir_path = args[1];
-            
-            // Проверяем, не пытаемся ли удалить директорию пользователя из VFS
-            if (dir_path.find("/opt/users/") == 0) {
-                string username = dir_path.substr(strlen("/opt/users/"));
-                if (!username.empty() && username.find('/') == string::npos) {
-                    handle_user_deletion(username);
-                    string cmd = "rm -rf \"" + dir_path + "\"";
-                    system(cmd.c_str());
-                    cout << "Removed VFS directory and user: " << username << endl;
-                } else {
-                    rmdir(dir_path.c_str());
-                }
-            } else {
-                rmdir(dir_path.c_str());
-            }
+        else if (args[0] == "vfs") {
+            handle_vfs_command(args);
         }
         else {
             // Пытаемся выполнить как внешнюю команду
@@ -551,6 +362,11 @@ int main()
         }
         
         cout.flush();
+    }
+    
+    // Размонтируем VFS при выходе
+    if (vfs_mounted) {
+        unmount_vfs();
     }
     
     if (write_file.is_open()) {
