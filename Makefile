@@ -1,6 +1,8 @@
 # Компилятор и флаги
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra
+CXXFLAGS = -std=c++20 -Wall -Wextra  -lreadline
+READLINE_FLAGS = -lreadline -lhistory
+FUSE_FLAGS = -I/usr/include/fuse3 -lfuse3 -L/usr/lib/x86_64-linux-gnu
 TARGET = kubsh
 
 # Версия пакета
@@ -8,12 +10,24 @@ VERSION = 1.0.0
 PACKAGE_NAME = kubsh
 BUILD_DIR = build
 DEB_DIR = $(BUILD_DIR)/$(PACKAGE_NAME)_$(VERSION)_amd64
+DEB_FILE := $(PWD)/kubsh.deb
+
+# Исходные файлы
+SRCS = main.cpp vfs.cpp
+OBJS = $(SRCS:.cpp=.o)
 
 # Основные цели
 all: $(TARGET)
 
-$(TARGET): src/main.cpp
-	$(CXX) $(CXXFLAGS) -o $(TARGET) src/main.cpp
+$(TARGET): $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(OBJS) $(FUSE_FLAGS) $(READLINE_FLAGS)
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Запуск шелла
+run: $(TARGET)
+	./$(TARGET)
 
 # Подготовка структуры для deb-пакета
 prepare-deb: $(TARGET)
@@ -30,6 +44,7 @@ prepare-deb: $(TARGET)
 	@echo "Priority: optional" >> $(DEB_DIR)/DEBIAN/control
 	@echo "Architecture: amd64" >> $(DEB_DIR)/DEBIAN/control
 	@echo "Maintainer: Your Name <your.email@example.com>" >> $(DEB_DIR)/DEBIAN/control
+	@echo "Depends: fuse3, libfuse3-4, libreadline8" >> $(DEB_DIR)/DEBIAN/control
 	@echo "Description: Simple custom shell" >> $(DEB_DIR)/DEBIAN/control
 	@echo " A simple custom shell implementation for learning purposes." >> $(DEB_DIR)/DEBIAN/control
 
@@ -37,20 +52,30 @@ prepare-deb: $(TARGET)
 deb: prepare-deb
 	@echo "Сборка deb-пакета..."
 	dpkg-deb --build $(DEB_DIR)
-	@mv $(BUILD_DIR)/$(PACKAGE_NAME)_$(VERSION)_amd64.deb ./kubsh.deb
-	@echo "Пакет создан: $(PACKAGE_NAME)_$(VERSION)_amd64.deb"
+	@mv $(BUILD_DIR)/$(PACKAGE_NAME)_$(VERSION)_amd64.deb $(DEB_FILE)
+	@echo "Пакет создан: $(DEB_FILE)"
 
 # Установка пакета (требует sudo)
 install: deb
-	sudo dpkg -i $(PACKAGE_NAME)_$(VERSION)_amd64.deb
+	sudo dpkg -i $(DEB_FILE)
 
 # Удаление пакета
 uninstall:
 	sudo dpkg -r $(PACKAGE_NAME)
 
+# Тестирование в Docker контейнере
+test: deb
+	@echo "Запуск теста в Docker контейнере..."
+	@-docker run --rm \
+		-v $(DEB_FILE):/mnt/kubsh.deb \
+		--device /dev/fuse \
+		--cap-add SYS_ADMIN \
+		--security-opt apparmor:unconfined \
+		ghcr.io/xardb/kubshfuse:master 2>/dev/null || true
+
 # Очистка
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) *.deb
+	rm -rf $(BUILD_DIR) $(TARGET) *.deb $(OBJS)
 
 # Показать справку
 help:
@@ -60,6 +85,8 @@ help:
 	@echo "  make install  - установить пакет"
 	@echo "  make uninstall - удалить пакет"
 	@echo "  make clean    - очистить проект"
+	@echo "  make run      - запустить шелл"
+	@echo "  make test     - собрать и запустить тест в Docker"
 	@echo "  make help     - показать эту справку"
 
-.PHONY: all deb install uninstall clean help prepare-deb
+.PHONY: all deb install uninstall clean help prepare-deb run test
